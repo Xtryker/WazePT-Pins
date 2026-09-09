@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WazePT Pins
 // @namespace    https://greasyfork.org/en/users/1559074-xtryker
-// @version      6.30.1
+// @version      6.30.2
 // @description  Menu circular de clique direito para o Waze Map Editor: Marcar local, Copiar hiperligação permanente, Atualizar aqui, Lomba (Z), Semáforo (Shift+T), Estrada (I)
 // @author       Xtryker
 // @icon         https://i.imgur.com/UksVMzF.png
@@ -12,6 +12,8 @@
 // @grant        GM_setClipboard
 // @grant        unsafeWindow
 // @grant        GM_xmlhttpRequest
+// @downloadURL https://github.com/Xtryker/WazePT-Pins/raw/refs/heads/main/WazePT%20Pins.user.js
+// @updateURL https://github.com/Xtryker/WazePT-Pins/raw/refs/heads/main/WazePT%20Pins.user.js
 // @connect      wazept-pins-default-rtdb.europe-west1.firebasedatabase.app
 // @connect      identitytoolkit.googleapis.com
 // @connect      securetoken.googleapis.com
