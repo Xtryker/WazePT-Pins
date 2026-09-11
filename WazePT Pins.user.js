@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WazePT Pins
 // @namespace    https://greasyfork.org/en/users/1559074-xtryker
-// @version      7.1.1
+// @version      7.3.2
 // @description  Menu circular de clique direito para o Waze Map Editor: Marcar local, Copiar hiperligação permanente, Atualizar aqui, Lomba (Z), Semáforo (Shift+T), Estrada (I)
 // @author       Xtryker
 // @icon         https://i.imgur.com/UksVMzF.png
@@ -35,7 +35,7 @@
 
   const SCRIPT_ID = "wme-rightclick-radial"; // internal id only — kept stable so existing users' saved pins/settings aren't orphaned by a rename
   const SCRIPT_NAME = "WazePT Pins";
-  const SCRIPT_VERSION = "7.1.1";
+  const SCRIPT_VERSION = "7.3.2";
 
   // ------------------------------------------------------------------
   // Portuguese (PT-PT) UI strings. Every user-facing label, toast, hint
@@ -191,6 +191,11 @@
     "Repeat (optional)": "Repetir (opcional)",
     "days": "dias",
     "weeks": "semanas",
+    "week": "semana",
+    "months": "meses",
+    "month": "mês",
+    "years": "anos",
+    "year": "ano",
     "e.g. every 7 days — the reminder reschedules itself after firing instead of stopping.":
       "por ex., a cada 7 dias — o lembrete volta a agendar-se sozinho em vez de parar.",
     "Sound": "Som",
@@ -322,7 +327,9 @@
     "Click the map to draw the area. Double-click to finish, Esc to cancel.": "Clique no mapa para desenhar a área. Duplo clique para terminar, Esc para cancelar.",
     "Something went wrong while drawing. Check the console for details.": "Ocorreu um erro ao desenhar. Veja a consola para mais detalhes.",
     "Invalid area — draw at least 3 points without crossing lines, then try again.": "Área inválida — desenhe pelo menos 3 pontos sem cruzar linhas e tente novamente.",
-    "Map note created": "Comentário criado",
+    "Map note created — no expiry": "Comentário criado — sem expiração",
+    "Map note created — expires in": "Comentário criado — expira em",
+    "edit to change": "edite para alterar",
     "Comment created, but it couldn't be opened automatically. Find it on the map to edit it.":
       "Comentário criado, mas não foi possível abri-lo automaticamente. Encontre-o no mapa para o editar.",
     "Could not create the map note. Check the console for details.": "Não foi possível criar o comentário. Veja a consola para mais detalhes.",
@@ -511,6 +518,20 @@
     "Could not update the shared pin (check your connection)":
       "Não foi possível atualizar o pin partilhado (verifique a ligação)",
 
+    // ── Definições de comentários (área) ──
+    "Comments": "Comentários",
+    "Round corners": "Cantos arredondados",
+    "Automatically rounds the corners of a drawn map comment area by the percentage below.":
+      "Arredonda automaticamente os cantos de uma área de comentário desenhada pela percentagem abaixo.",
+    "Corner radius": "Raio do canto",
+    "How much of each edge to round off, as a percentage.":
+      "Quanto de cada aresta arredondar, em percentagem.",
+    "Default expiry": "Expiração predefinida",
+    "The placeholder expiry date set when a map comment area is created.":
+      "A data de expiração provisória definida ao criar uma área de comentário.",
+    "Due to a current WME limitation, a map comment area can't be created with no expiry at all — a real future date is always required. This only controls how far out that date is set; it can still be edited afterwards in WME's own comment panel.":
+      "Devido a uma limitação atual do WME, uma área de comentário não pode ser criada sem qualquer expiração — é sempre exigida uma data futura real. Isto só controla quão distante essa data é definida; pode continuar a ser editada depois no próprio painel de comentários do WME.",
+
     // ── Definições de cortes (v6.2) ──
     "Text filled in by the \"quick description\" toggle in the closures window.":
       "Texto preenchido pelo botão \"descrição rápida\" na janela de cortes.",
@@ -557,6 +578,8 @@
     "Records detailed activity (last hour) to include when you export diagnostics below.":
       "Regista atividade detalhada (última hora) para incluir quando exportar o diagnóstico abaixo.",
     "Export diagnostics": "Exportar diagnóstico",
+    "Clear logs": "Limpar registos",
+    "Debug log cleared": "Registo de depuração limpo",
     "Diagnostics exported": "Diagnóstico exportado",
     "Could not create the diagnostics file": "Não foi possível criar o ficheiro de diagnóstico",
 
@@ -1037,6 +1060,16 @@
     // active route, ported from WME Route Speeds. On by default since
     // it's the main payoff of testing a route in the first place.
     routeShowSpeeds: true,
+    // Map comment (area note) creation — see the "Round-corner map
+    // comment shapes" section further down for the actual geometry.
+    // On by default with a 10% radius, matching what was asked for.
+    mapCommentRoundCorners: true,
+    mapCommentRoundPct: 10,
+    // Default placeholder expiry for a newly drawn area comment (see
+    // computeDefaultMapCommentExpiryDate) — 3 months, same value this
+    // used before it became configurable.
+    mapCommentDefaultExpiryValue: 3,
+    mapCommentDefaultExpiryUnit: "months",
     showPanel: true,
     showPinNames: true,
     segmentSnapRadiusPx: 14,
@@ -3728,6 +3761,18 @@
     const arr = loadDebugLogRaw();
     pruneDebugLog(arr);
     return arr.slice();
+  }
+
+  // Explicit user action from the "Clear logs" button in the Diagnostics
+  // settings section — not something the log's own retention/rotation
+  // ever needs to call on its own. Clears BOTH the in-memory cache and
+  // the persisted copy immediately: unlike appendDebugLog's writes,
+  // this doesn't go through scheduleDebugLogWrite's 500ms coalescing,
+  // since a "Clear" button that visibly still has old entries in it for
+  // half a second reads as broken, not as a reasonable batching delay.
+  function clearDebugLog() {
+    debugLogCache = [];
+    try { localStorage.setItem(DEBUG_LOG_KEY, "[]"); } catch {}
   }
 
   // Turns an arbitrary dlog() argument into a short, safe string:
@@ -9860,6 +9905,174 @@
 
   let mapNoteAreaBusy = false;
 
+  /* ------------------------------------------------------------------ *
+   *  Round-corner map comment shapes
+   *
+   *  ⚠️ Asked for as an import from WazePT Suite. It isn't there:
+   *  Suite's own shape-transform toolkit was searched thoroughly (every
+   *  function touching polygon/shape/corner/round in that file) and has
+   *  a regular-polygon fitter, a rectangle fitter, a themed shape
+   *  catalog (heart, star, airplane, flag, bat, puzzle-piece, and a few
+   *  more), and a segment-offset/mitring helper in WAZEPT-Segments — but
+   *  nothing that takes an ARBITRARY drawn polygon and rounds its own
+   *  corners by a percentage. That function doesn't exist anywhere in
+   *  this project to import, so it's written fresh below instead —
+   *  a standard quadratic-Bézier corner-rounding construction (used
+   *  broadly in vector-graphics "rounded polygon" tools generally, not
+   *  a port of any one of them).
+   *
+   *  toLocalMeters/fromLocalMeters ARE ported, though — this project's
+   *  own WazePT Suite (toLocalMeters/fromLocalMeters) and WAZEPT-Segments
+   *  (the same flat-plane idea, different helper names) both do this
+   *  exact equirectangular approximation around a local origin before
+   *  doing any planar geometry on lon/lat coordinates, for the same
+   *  reason it's needed here: lon/lat degrees aren't equal-distance
+   *  units, so cutting "15% of an edge's length" directly in degrees
+   *  would cut unevenly north-south vs east-west. Good enough at the
+   *  scale of a single drawn area (not accurate across a whole
+   *  country) — exactly the scale this is ever used at.
+   * ------------------------------------------------------------------ */
+
+  const EARTH_RADIUS_M = 6378137; // WGS84 equatorial radius — same constant this ecosystem's other scripts use for the same approximation.
+
+  function lonLatToLocalMeters(lonLatPoints) {
+    const lon0 = lonLatPoints.reduce((sum, p) => sum + p[0], 0) / lonLatPoints.length;
+    const lat0 = lonLatPoints.reduce((sum, p) => sum + p[1], 0) / lonLatPoints.length;
+    const lat0Rad = (lat0 * Math.PI) / 180;
+    const points = lonLatPoints.map(([lon, lat]) => [
+      EARTH_RADIUS_M * ((lon - lon0) * Math.PI / 180) * Math.cos(lat0Rad),
+      EARTH_RADIUS_M * ((lat - lat0) * Math.PI / 180),
+    ]);
+    return { points, origin: { lon0, lat0, lat0Rad } };
+  }
+
+  function localMetersToLonLat(points, origin) {
+    return points.map(([x, y]) => [
+      origin.lon0 + (x / (EARTH_RADIUS_M * Math.cos(origin.lat0Rad))) * (180 / Math.PI),
+      origin.lat0 + (y / EARTH_RADIUS_M) * (180 / Math.PI),
+    ]);
+  }
+
+  // Rounds the corners of one closed GeoJSON ring (array of [lon, lat]
+  // pairs, first point === last) by `pct` percent. At each vertex, both
+  // adjacent edges are cut back by that percentage of the edge's own
+  // length (clamped to half the edge, so the cut from THIS vertex and
+  // the cut from the vertex at the other end of the same edge can never
+  // meet past each other and self-intersect — the shape degrades
+  // gracefully toward a diamond at pct=100 rather than folding over
+  // itself), and the sharp corner between those two cut points is
+  // replaced with a quadratic-Bézier arc using the original vertex as
+  // the control point — the standard construction for an arc that
+  // starts and ends tangent to the two original edges, which is what
+  // makes it read as a smooth rounded corner rather than a flat chamfer.
+  function roundPolygonRingCorners(lonLatRing, pct) {
+    const p = Math.max(0, Math.min(100, Number(pct) || 0)) / 100;
+    if (p <= 0 || !Array.isArray(lonLatRing) || lonLatRing.length < 4) return lonLatRing;
+
+    const ring = lonLatRing.slice(0, -1); // drop the duplicated closing point for the per-vertex walk
+    const n = ring.length;
+    if (n < 3) return lonLatRing;
+
+    const { points: local, origin } = lonLatToLocalMeters(ring);
+
+    const edgeLen = (a, b) => Math.hypot(b[0] - a[0], b[1] - a[1]);
+    const lerp = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    // Interpolation points per rounded corner — enough to read as a
+    // curve rather than a straight cut, without ballooning the vertex
+    // count of what's still meant to be a simple drawn area.
+    const ARC_STEPS = 8;
+
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const prev = local[(i - 1 + n) % n];
+      const cur = local[i];
+      const next = local[(i + 1) % n];
+
+      const lenPrev = edgeLen(prev, cur);
+      const lenNext = edgeLen(cur, next);
+      if (lenPrev === 0 || lenNext === 0) { out.push(cur); continue; }
+
+      const cutIn = Math.min(p * lenPrev, lenPrev / 2);
+      const cutOut = Math.min(p * lenNext, lenNext / 2);
+      const pIn = lerp(cur, prev, cutIn / lenPrev);
+      const pOut = lerp(cur, next, cutOut / lenNext);
+
+      out.push(pIn);
+      for (let s = 1; s < ARC_STEPS; s++) {
+        const t = s / ARC_STEPS;
+        // Standard quadratic-Bézier de Casteljau construction: lerp
+        // along each control-polygon edge, then lerp between those.
+        const a = lerp(pIn, cur, t);
+        const b = lerp(cur, pOut, t);
+        out.push(lerp(a, b, t));
+      }
+      out.push(pOut);
+    }
+
+    out.push(out[0].slice());
+    return localMetersToLonLat(out, origin);
+  }
+
+  // Applies roundPolygonRingCorners to every ring of a GeoJSON Polygon
+  // (the outer ring and, if present, any holes) — sdk.Map.drawPolygon()
+  // only ever produces a single outer ring in practice for a drawn area
+  // comment, but every ring is rounded on the off chance one isn't.
+  // Never throws outward: any failure logs and returns the ORIGINAL
+  // sharp-cornered geometry, since a sharp-cornered comment is always
+  // better than none at all.
+  function roundMapCommentGeometryCorners(geometry, pct) {
+    if (!geometry || geometry.type !== "Polygon" || !Array.isArray(geometry.coordinates)) return geometry;
+    try {
+      const coordinates = geometry.coordinates.map((ring) => roundPolygonRingCorners(ring, pct));
+      return { ...geometry, coordinates };
+    } catch (err) {
+      dlog("roundMapCommentGeometryCorners failed, using the original sharp-corner geometry", err);
+      return geometry;
+    }
+  }
+
+  const MAP_COMMENT_EXPIRY_UNITS = ["days", "weeks", "months", "years"];
+
+  // The placeholder expiry date used when creating a map comment area —
+  // see the field-notes comment above createBareMapComment for why a
+  // real "no expiry" isn't possible at all right now, on either the
+  // create or update path. Configurable rather than hardcoded to 3
+  // months, but still defaults to exactly that when unset, so existing
+  // installs that never touch the new setting keep today's behaviour.
+  // "3 months" / "1 week" / "10 days" — singular vs plural chosen
+  // correctly (not just always the plural form), reused by both the
+  // success toast below and the settings panel's own explanation text
+  // so the two can never disagree about what the configured default
+  // actually is.
+  function formatMapCommentDefaultExpiryLabel() {
+    const st = loadSettings();
+    const rawValue = Number(st.mapCommentDefaultExpiryValue);
+    const value = Number.isFinite(rawValue) && rawValue > 0 ? Math.round(rawValue) : 3;
+    const unit = MAP_COMMENT_EXPIRY_UNITS.includes(st.mapCommentDefaultExpiryUnit)
+      ? st.mapCommentDefaultExpiryUnit
+      : "months";
+    const singular = unit.slice(0, -1); // "days" -> "day", etc. — every unit key is a regular plural.
+    return `${value} ${T(value === 1 ? singular : unit)}`;
+  }
+
+  function computeDefaultMapCommentExpiryDate() {
+    const st = loadSettings();
+    const rawValue = Number(st.mapCommentDefaultExpiryValue);
+    const value = Number.isFinite(rawValue) && rawValue > 0 ? Math.round(rawValue) : 3;
+    const unit = MAP_COMMENT_EXPIRY_UNITS.includes(st.mapCommentDefaultExpiryUnit)
+      ? st.mapCommentDefaultExpiryUnit
+      : "months";
+    const d = new Date();
+    // Calendar-accurate (setDate/setMonth/setFullYear), not fixed
+    // millisecond multiples, so "1 month" lands on the same day next
+    // month regardless of how many days that month actually has.
+    if (unit === "days") d.setDate(d.getDate() + value);
+    else if (unit === "weeks") d.setDate(d.getDate() + value * 7);
+    else if (unit === "years") d.setFullYear(d.getFullYear() + value);
+    else d.setMonth(d.getMonth() + value);
+    return d;
+  }
+
   async function actionDrawMapNoteArea() {
     if (!isEditorAllowed()) {
       closeMenu();
@@ -9903,15 +10116,24 @@
         return;
       }
 
+      // Applied here, once, right after the area is drawn — not inside
+      // createBareMapComment — so the ROUNDED geometry (not the
+      // original sharp-cornered one) is what actually gets sent to WME.
+      const st = loadSettings();
+      if (st.mapCommentRoundCorners !== false) {
+        const pct = Number(st.mapCommentRoundPct);
+        geometry = roundMapCommentGeometryCorners(geometry, Number.isFinite(pct) ? pct : 10);
+      }
+
       try {
-        const newKey = await createBareMapComment(geometry);
+        const { key: newKey, expiryCleared } = await createBareMapComment(geometry);
         if (newKey == null) {
           // Created, but the before/after diff below found no new key to
           // open — surfaced honestly rather than pretending it worked.
           toast(T("Comment created, but it couldn't be opened automatically. Find it on the map to edit it."));
           return;
         }
-        openNativeMapCommentEditor(newKey);
+        openNativeMapCommentEditor(newKey, expiryCleared);
       } catch (err) {
         dlog("createBareMapComment failed", err);
         toast(T("Could not create the map note. Check the console for details."));
@@ -9936,6 +10158,21 @@
     throw new Error("No known method to create a map note was found on sdk.DataModel.MapComments.");
   }
 
+  // sdk.DataModel.MapComments.updateComment({ mapCommentId, endDate: null
+  // }) was tried here too, right after the 3-month placeholder create
+  // below — reasoning that update validation is often looser than
+  // create's, since this suite's own WazePT Suite script confirms
+  // updateComment() is real (it uses it to move a comment's geometry).
+  // It WAS looser: the call didn't throw. But a diagnostics export from
+  // the field showed what that null actually did once persisted — WME's
+  // own edit panel rendered the expiry field as literally "Invalid", not
+  // blank and not "never expires". So looser validation here meant
+  // "accepts a value it can't actually render", not "accepts a value
+  // CREATE was wrong to reject" — worse than doing nothing, since a real
+  // 3-month date the editor can see and change beats a comment whose
+  // expiry field a mortal can't read at all. Removed rather than left as
+  // dead code so a future re-read of this file doesn't find an unused
+  // resolveUpdateMapCommentFn() and wonder if it was ever wired up.
   // Creates a comment with just the drawn geometry — no title/body of
   // our own asking, since WME's own editor (opened right after this) is
   // where those get filled in. Returns the new comment's model key, or
@@ -9951,24 +10188,28 @@
   // way so a "the editor never opened" report has something concrete to
   // check.
   //
-  // ⚠️ endDate history, confirmed directly from the SDK's OWN error text
-  // and behaviour in the field (not guessed):
-  //   - omitted entirely  → "Invalid arguments: endDate must be defined"
-  //   - endDate: null     → "Invalid arguments: endDate cannot be null"
-  //   - endDate: 0        → accepted, no error — but WME shows this as a
-  //                         real 1 Jan 1970 expiry, not "no expiry".
-  // So the field is REQUIRED, must be a real non-null value, AND there is
-  // no confirmed sentinel this API treats as "never expires" — WME's own
-  // native drawing tool must be creating comments through a different
-  // path than this SDK method exposes. Given that, this stops chasing a
-  // sentinel and uses an unmistakable PLACEHOLDER future date instead:
-  // the comment opens directly in WME's own native edit panel right
-  // after this, where the expiry field can simply be cleared by hand if
-  // WME's own UI allows clearing it (unconfirmed, but a reasonable bet —
-  // update validation is often looser than create validation). Three
-  // months out, on request: long enough that an area comment left in
-  // place through a normal editing cycle doesn't quietly expire before
-  // the work it marks is finished.
+  // ⚠️ endDate history, confirmed directly from the SDK's OWN error text,
+  // its accepted-but-wrong values, AND — as of the updateComment() null
+  // attempt above — its own rendering of a value it silently accepted:
+  //   - omitted entirely (CREATE)  → "Invalid arguments: endDate must be defined"
+  //   - endDate: null     (CREATE) → "Invalid arguments: endDate cannot be null"
+  //   - endDate: 0        (CREATE) → accepted, no error — WME shows a real
+  //                                  1 Jan 1970 expiry, not "no expiry".
+  //   - endDate: null     (UPDATE) → accepted, no error — WME's own edit
+  //                                  panel then shows "Invalid" in the
+  //                                  expiry field. Confirmed from a field
+  //                                  diagnostics export, not reasoned out.
+  // Three attempts, three different flavours of wrong, zero accepted
+  // "never expires" sentinels found on EITHER endpoint. This stops
+  // guessing at values for this field and settles on the placeholder as
+  // the actual, final answer — not a fallback for something better, since
+  // nothing better has been found. Three months out: long enough that an
+  // area comment left in place through a normal editing cycle doesn't
+  // quietly expire before the work it marks is finished. If WME's native
+  // drawing tool truly offers real "never expires" area comments, it's
+  // doing so through some mechanism this SDK surface doesn't expose —
+  // the honest placeholder plus a note in the success toast is what's
+  // left once that's been ruled out this thoroughly.
   async function createBareMapComment(geometry) {
     const args = { geometry, subject: "", body: "" };
     dlog("createBareMapComment args", args);
@@ -9976,26 +10217,27 @@
     const keysBefore = new Set(Object.keys(UW?.W?.model?.mapComments?.objects || {}));
 
     const isValidationError = (err) => sdk?.Errors && err instanceof sdk.Errors.ValidationError;
+    let usedPlaceholderEndDate = false;
 
     try {
       await addFn(args);
     } catch (err) {
       if (!isValidationError(err)) throw err;
-      dlog("createBareMapComment: no endDate rejected, retrying with a placeholder near-future date", err);
-      // 3 months out. Confirmed there is no accepted "never" sentinel, so
-      // this is a deliberate, honest placeholder — not a further guess
-      // at a magic value, since 0 already disproved that idea.
-      // Calendar-accurate (setMonth), not a fixed day count, so the
-      // placeholder lands on the same day-of-month 3 months out
-      // regardless of how many days those months actually contain.
-      const placeholder = new Date();
-      placeholder.setMonth(placeholder.getMonth() + 3);
+      dlog("createBareMapComment: no endDate rejected, retrying with a placeholder date", err);
+      // Configurable via the "Default expiry" setting in the Comments
+      // section (computeDefaultMapCommentExpiryDate, defined above) —
+      // 3 months when that setting has never been touched, same as
+      // before this became configurable.
+      const placeholder = computeDefaultMapCommentExpiryDate();
       await addFn({ ...args, endDate: placeholder.getTime() });
+      usedPlaceholderEndDate = true;
     }
 
     const newKeys = Object.keys(UW?.W?.model?.mapComments?.objects || {}).filter((k) => !keysBefore.has(k));
     dlog("createBareMapComment newKeys", newKeys);
-    return newKeys.length ? newKeys[0] : null;
+    const newKey = newKeys.length ? newKeys[0] : null;
+
+    return { key: newKey, expiryCleared: !usedPlaceholderEndDate };
   }
 
   // Selects the freshly created comment exactly the way clicking an
@@ -10009,10 +10251,26 @@
   // documentation available here pins the exact string WME expects for
   // a map comment. If it's wrong, setSelection should throw, which is
   // caught and logged rather than left as a silent no-op.
-  function openNativeMapCommentEditor(key) {
+  //
+  // `expiryCleared` only changes which success toast is shown — true
+  // when createBareMapComment's updateComment(endDate: null) attempt
+  // actually went through, so the editor doesn't have to open the panel
+  // just to check whether it worked; false (including "never needed
+  // clearing") gets the honest placeholder-expiry message instead.
+  function openNativeMapCommentEditor(key, expiryCleared) {
     try {
       sdk.Editing.setSelection({ selection: { objectType: "mapComment", ids: [key] } });
-      toast(T("Map note created"));
+      // expiryCleared is only true in the case create() didn't need the
+      // placeholder at all (see createBareMapComment — not observed in
+      // the field so far, but handled honestly rather than assumed
+      // impossible). The far more common case gets a toast that says
+      // what actually happened, using the CONFIGURED default duration
+      // (formatMapCommentDefaultExpiryLabel) rather than a hardcoded "3
+      // months" that would go stale the moment someone changes the
+      // setting.
+      toast(expiryCleared
+        ? T("Map note created — no expiry")
+        : `${T("Map note created — expires in")} ${formatMapCommentDefaultExpiryLabel()}, ${T("edit to change")}`);
     } catch (err) {
       dlog("openNativeMapCommentEditor failed", err);
       toast(T("Comment created, but it couldn't be opened automatically. Find it on the map to edit it."));
@@ -11349,6 +11607,126 @@
     wrap.appendChild(mkCollapsibleSection("routeOptions", T("Route options"), cardRoute));
 
 
+    // ── Comentários (map comment area shape + default expiry) ──
+    const cardComments = document.createElement("div");
+
+    let roundPctInputRef = null;
+    cardComments.appendChild(mkRow(
+      T("Round corners"),
+      T("Automatically rounds the corners of a drawn map comment area by the percentage below."),
+      st.mapCommentRoundCorners !== false,
+      (v) => {
+        const s = loadSettings();
+        s.mapCommentRoundCorners = v;
+        saveSettings(s);
+        if (roundPctInputRef) roundPctInputRef.disabled = !v;
+      },
+    ));
+
+    const pctRow = document.createElement("div");
+    pctRow.className = "wmeRcSideRow";
+    pctRow.innerHTML = `<div><div class="wmeRcSideTitle">${T("Corner radius")}</div>
+      <div class="wmeRcSideSub">${T("How much of each edge to round off, as a percentage.")}</div></div>`;
+    const pctInp = document.createElement("input");
+    pctInp.type = "number";
+    pctInp.min = "0";
+    pctInp.max = "100";
+    pctInp.step = "1";
+    pctInp.className = "wmeRcInput";
+    pctInp.style.maxWidth = "80px";
+    const initialPct = Number(st.mapCommentRoundPct);
+    pctInp.value = String(Number.isFinite(initialPct) ? initialPct : 10);
+    pctInp.disabled = st.mapCommentRoundCorners === false;
+    pctInp.addEventListener("change", () => {
+      const v = Math.max(0, Math.min(100, Math.round(Number(pctInp.value)) || 0));
+      pctInp.value = String(v);
+      const s = loadSettings();
+      s.mapCommentRoundPct = v;
+      saveSettings(s);
+    });
+    roundPctInputRef = pctInp;
+    pctRow.appendChild(pctInp);
+    cardComments.appendChild(pctRow);
+
+    const expRow = document.createElement("div");
+    // NOT wmeRcSideRow here (unlike every other row in this section) —
+    // that class puts the label div and the controls side by side,
+    // splitting the sidebar's already-narrow width between them. With
+    // a title, a sub-line AND two controls (the value box and the unit
+    // dropdown) that left barely any room for either input — reported
+    // as "so small I can't see anything in it". Stacked vertically
+    // instead: full-width label/description on top, full-width
+    // controls on their own line below.
+    expRow.style.padding = "7px 0";
+    expRow.innerHTML = `<div class="wmeRcSideTitle">${T("Default expiry")}</div>
+      <div class="wmeRcSideSub">${T("The placeholder expiry date set when a map comment area is created.")}</div>`;
+
+    const expInputsWrap = document.createElement("div");
+    expInputsWrap.style.display = "flex";
+    expInputsWrap.style.gap = "6px";
+    expInputsWrap.style.marginTop = "6px";
+
+    const expValInp = document.createElement("input");
+    expValInp.type = "number";
+    expValInp.min = "1";
+    expValInp.step = "1";
+    expValInp.className = "wmeRcInput";
+    // No longer squeezed against a label — flex:1 with a floor rather
+    // than a tight maxWidth, so it's actually readable.
+    expValInp.style.flex = "1 1 80px";
+    expValInp.style.minWidth = "0";
+    const initialExpVal = Number(st.mapCommentDefaultExpiryValue);
+    expValInp.value = String(Number.isFinite(initialExpVal) && initialExpVal > 0 ? initialExpVal : 3);
+
+    const expUnitSel = document.createElement("select");
+    expUnitSel.className = "wmeRcInput" + (detectWmeIsLightTheme() ? " wme-light-select" : "");
+    // Takes the rest of the row — this is what was rendering as a
+    // sliver too narrow to read its own selected option.
+    expUnitSel.style.flex = "2 1 140px";
+    expUnitSel.style.minWidth = "0";
+    for (const u of MAP_COMMENT_EXPIRY_UNITS) {
+      const opt = document.createElement("option");
+      opt.value = u;
+      opt.textContent = T(u);
+      expUnitSel.appendChild(opt);
+    }
+    expUnitSel.value = MAP_COMMENT_EXPIRY_UNITS.includes(st.mapCommentDefaultExpiryUnit)
+      ? st.mapCommentDefaultExpiryUnit
+      : "months";
+
+    const persistDefaultExpiry = () => {
+      const v = Math.max(1, Math.round(Number(expValInp.value)) || 1);
+      expValInp.value = String(v);
+      const s = loadSettings();
+      s.mapCommentDefaultExpiryValue = v;
+      s.mapCommentDefaultExpiryUnit = expUnitSel.value;
+      saveSettings(s);
+    };
+    expValInp.addEventListener("change", persistDefaultExpiry);
+    expUnitSel.addEventListener("change", persistDefaultExpiry);
+
+    expInputsWrap.appendChild(expValInp);
+    expInputsWrap.appendChild(expUnitSel);
+    expRow.appendChild(expInputsWrap);
+    cardComments.appendChild(expRow);
+
+    const expiryLimitHint = document.createElement("div");
+    expiryLimitHint.className = "wmeRcSideSub";
+    expiryLimitHint.style.marginTop = "2px";
+    // The honest, confirmed-in-the-field reason "no expiry" isn't an
+    // option in this dropdown — not a design choice, a WME limitation:
+    // every value tried for a real "never expires" area comment (create
+    // with no endDate, create with endDate:null, create with endDate:0,
+    // and update with endDate:null once the comment exists) was either
+    // rejected outright or accepted and then rendered wrong by WME's
+    // own edit panel (1 Jan 1970, or literally "Invalid"). See the
+    // field-notes comment above createBareMapComment for the full list.
+    expiryLimitHint.textContent = T("Due to a current WME limitation, a map comment area can't be created with no expiry at all — a real future date is always required. This only controls how far out that date is set; it can still be edited afterwards in WME's own comment panel.");
+    cardComments.appendChild(expiryLimitHint);
+
+    wrap.appendChild(mkCollapsibleSection("mapComments", T("Comments"), cardComments));
+
+
     // ── Cortes (closures) ──
     const card2c = document.createElement("div");
 
@@ -11610,6 +11988,7 @@
     const diagRow = document.createElement("div");
     diagRow.className = "wmeRcSideRow";
     diagRow.style.marginTop = "6px";
+    diagRow.style.gap = "6px";
     const diagBtn = document.createElement("div");
     diagBtn.className = "wmeRcBtn";
     diagBtn.style.flex = "1 1 auto";
@@ -11621,6 +12000,26 @@
     diagBtn.innerHTML = `${ICONS.bug}<span>${T("Export diagnostics")}</span>`;
     diagBtn.addEventListener("click", actionExportDiagnostics);
     diagRow.appendChild(diagBtn);
+
+    // Clears the SAME log actionExportDiagnostics reads from
+    // (getRecentDebugLog/DEBUG_LOG_KEY) — a quick way to start a fresh,
+    // uncluttered log right before reproducing a bug, rather than
+    // exporting an hour of unrelated activity along with it.
+    const clearLogBtn = document.createElement("div");
+    clearLogBtn.className = "wmeRcBtn";
+    clearLogBtn.style.flex = "1 1 auto";
+    clearLogBtn.style.textAlign = "center";
+    clearLogBtn.style.display = "flex";
+    clearLogBtn.style.alignItems = "center";
+    clearLogBtn.style.justifyContent = "center";
+    clearLogBtn.style.gap = "6px";
+    clearLogBtn.innerHTML = `${ICONS.trash}<span>${T("Clear logs")}</span>`;
+    clearLogBtn.addEventListener("click", () => {
+      clearDebugLog();
+      toast(T("Debug log cleared"));
+    });
+    diagRow.appendChild(clearLogBtn);
+
     card4.appendChild(diagRow);
 
     wrap.appendChild(mkCollapsibleSection("diagnostics", T("Diagnostics"), card4));
