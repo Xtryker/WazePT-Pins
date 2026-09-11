@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WazePT Pins
 // @namespace    https://greasyfork.org/en/users/1559074-xtryker
-// @version      6.30.3
+// @version      6.31.0
 // @description  Menu circular de clique direito para o Waze Map Editor: Marcar local, Copiar hiperligação permanente, Atualizar aqui, Lomba (Z), Semáforo (Shift+T), Estrada (I)
 // @author       Xtryker
 // @icon         https://i.imgur.com/UksVMzF.png
@@ -12,8 +12,6 @@
 // @grant        GM_setClipboard
 // @grant        unsafeWindow
 // @grant        GM_xmlhttpRequest
-// @downloadURL https://github.com/Xtryker/WazePT-Pins/raw/refs/heads/main/WazePT%20Pins.user.js
-// @updateURL https://github.com/Xtryker/WazePT-Pins/raw/refs/heads/main/WazePT%20Pins.user.js
 // @connect      wazept-pins-default-rtdb.europe-west1.firebasedatabase.app
 // @connect      identitytoolkit.googleapis.com
 // @connect      securetoken.googleapis.com
@@ -35,7 +33,7 @@
 
   const SCRIPT_ID = "wme-rightclick-radial"; // internal id only — kept stable so existing users' saved pins/settings aren't orphaned by a rename
   const SCRIPT_NAME = "WazePT Pins";
-  const SCRIPT_VERSION = "6.30.1";
+  const SCRIPT_VERSION = "6.31.0";
 
   // ------------------------------------------------------------------
   // Portuguese (PT-PT) UI strings. Every user-facing label, toast, hint
@@ -1989,12 +1987,26 @@
   /* ------------------------------------------------------------------ *
    *  Access control — editor allowlist (Google Sheet, published as CSV)
    *
-   *  The whole Pins feature — panel, map markers, the "Pin this place"
-   *  radial action, and every shared-pin read/write — is restricted to
-   *  editors whose WME username appears on a community-maintained Google
-   *  Sheet. An editor not on the list never sees the panel or any pin
-   *  marker, and every entry point that could create/read/write a pin
-   *  refuses before doing anything.
+   *  The ENTIRE script is restricted to editors whose WME username
+   *  appears on a community-maintained Google Sheet — not just the Pins
+   *  feature this started out gating. An editor not on the list:
+   *    - never sees the Pins panel, any pin marker, or the sidebar tab
+   *      (mountSidebar()/ensurePinsPanel() refuse to build anything);
+   *    - never gets the radial menu at all — right-click falls through
+   *      to WME's own native context menu instead (onContextMenu()/
+   *      onMouseDown() refuse before building or showing it), which in
+   *      turn is how every OTHER feature in this file is launched:
+   *      route test, closures, split segment, the map note area tool,
+   *      and the Z/Shift+T/I shortcut relays all only exist as radial
+   *      menu items, so gating the menu itself gates all of them;
+   *    - and, as defense in depth on top of that single choke point,
+   *      the state-mutating actions among those (actionRoutePoint,
+   *      actionDrawMapNoteArea, actionSplitSegment, actionOpenClosures)
+   *      each refuse independently too — the same belt-and-braces this
+   *      section already applied to actionPinThisPlace, in case a
+   *      future code path ever reaches one of them some other way.
+   *  Every entry point that could create/read/write data refuses before
+   *  doing anything.
    * ------------------------------------------------------------------ */
 
   const ALLOWLIST_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSqNoI5mlY6wqOvIusO-Oj5BIpahfrHNt54U7G0jIHGIyQHoJwD7jSFQLQSfW561-R1jFRL9lOpBAaz/pub?gid=0&single=true&output=csv";
@@ -2239,6 +2251,14 @@
   //    path. Every ensure/start function called here is independently
   //    idempotent, so calling them again on an already-settled tick is
   //    always a harmless no-op.
+  //
+  //    Named for pins specifically because that's the only PERSISTENT
+  //    UI this reactive mount/unmount treatment applies to. The radial
+  //    menu (which gates every other feature — see the access-control
+  //    section comment above) needs no equivalent here: it isn't
+  //    mounted ahead of time, isEditorAllowed() is simply checked again
+  //    at the moment of each right-click, so it can never go stale
+  //    between ticks the way an already-built panel could.
   async function refreshPinsAccessState() {
     if (pinsAccessRefreshInFlight) return;
     pinsAccessRefreshInFlight = true;
@@ -6914,6 +6934,10 @@
   // what makes "select several segments, right-click one of them" target
   // the whole selection instead of only the segment under the cursor.
   function actionOpenClosures(segmentIdOrIds) {
+    if (!isEditorAllowed()) {
+      toast(T("This feature is restricted to editors on the approved list."));
+      return;
+    }
     // Number(null) and Number(undefined) are 0 and NaN respectively — 0
     // is finite, so a bare Number.isFinite filter let a null/undefined
     // entry through as a bogus "segment 0". That happened on every
@@ -9584,6 +9608,11 @@
   // rather than accumulating points, which is what "test another route"
   // almost always means.
   function actionRoutePoint(ll) {
+    if (!isEditorAllowed()) {
+      closeMenu();
+      toast(T("This feature is restricted to editors on the approved list."));
+      return;
+    }
     closeMenu();
 
     // Phase 3 — a route is on screen, so this click clears it. Checked
@@ -9642,6 +9671,11 @@
   let mapNoteAreaBusy = false;
 
   async function actionDrawMapNoteArea() {
+    if (!isEditorAllowed()) {
+      closeMenu();
+      toast(T("This feature is restricted to editors on the approved list."));
+      return;
+    }
     closeMenu();
     if (mapNoteAreaBusy) return;
     if (typeof sdk?.Map?.drawPolygon !== "function") {
@@ -9960,6 +9994,11 @@
   // reused here rather than re-detecting, so "split immediately" is
   // guaranteed to act on the exact segment the menu was opened over.
   function actionSplitSegment(hitSeg) {
+    if (!isEditorAllowed()) {
+      closeMenu();
+      toast(T("This feature is restricted to editors on the approved list."));
+      return;
+    }
     closeMenu();
     if (hitSeg) {
       performSplit(hitSeg.segmentId, hitSeg.lon, hitSeg.lat);
@@ -10219,6 +10258,17 @@
 
   function onContextMenu(e) {
     if (!enabled) return;
+    // Access control, applied here rather than only inside individual
+    // actions: this is the SAME single check the Pins panel/markers/
+    // sidebar tab already gate on (isEditorAllowed()), extended to cover
+    // the radial menu — which is how every other feature in this script
+    // (route test, closures, split segment, map note area, the WME
+    // shortcut relays) gets launched. Blocking it here means a
+    // disallowed editor's right-click falls through to WME's own native
+    // context menu instead, exactly like `enabled === false` already
+    // behaves above — no menu, no toast spam on every right-click, and
+    // nothing built that would need tearing down later.
+    if (!isEditorAllowed()) return;
     if (e.shiftKey) return;
     if (!isMapClick(e.clientX, e.clientY)) return;
 
@@ -10244,6 +10294,15 @@
 
   function onMouseDown(e) {
     if (!enabled) return;
+    // Same gate as onContextMenu above — this handler's only real job is
+    // consuming the LEFT-click that commits an armed split-pick, and
+    // split-pick can only ever have been armed via the (now-gated)
+    // radial menu in the first place. Kept here too rather than relying
+    // solely on that upstream gate, on the same defense-in-depth
+    // reasoning the rest of this script already applies: a future code
+    // path that could re-arm split-pick some other way shouldn't
+    // silently inherit access it was never granted.
+    if (!isEditorAllowed()) return;
     // Left-click while "click nearest to split" is armed: consumed here
     // instead of reaching WME's own click-to-select handling, since a
     // normal left-click during this mode means "split there", not
