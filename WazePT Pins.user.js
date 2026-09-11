@@ -12,6 +12,8 @@
 // @grant        GM_setClipboard
 // @grant        unsafeWindow
 // @grant        GM_xmlhttpRequest
+// @downloadURL https://github.com/Xtryker/WazePT-Pins/raw/refs/heads/main/WazePT%20Pins.user.js
+// @UpdateURL https://github.com/Xtryker/WazePT-Pins/raw/refs/heads/main/WazePT%20Pins.user.js
 // @connect      wazept-pins-default-rtdb.europe-west1.firebasedatabase.app
 // @connect      identitytoolkit.googleapis.com
 // @connect      securetoken.googleapis.com
