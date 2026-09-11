@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WazePT Pins
 // @namespace    https://greasyfork.org/en/users/1559074-xtryker
-// @version      7.3.2
+// @version      7.4.0
 // @description  Menu circular de clique direito para o Waze Map Editor: Marcar local, Copiar hiperligação permanente, Atualizar aqui, Lomba (Z), Semáforo (Shift+T), Estrada (I)
 // @author       Xtryker
 // @icon         https://i.imgur.com/UksVMzF.png
@@ -35,7 +35,7 @@
 
   const SCRIPT_ID = "wme-rightclick-radial"; // internal id only — kept stable so existing users' saved pins/settings aren't orphaned by a rename
   const SCRIPT_NAME = "WazePT Pins";
-  const SCRIPT_VERSION = "7.3.2";
+  const SCRIPT_VERSION = "7.4.0";
 
   // ------------------------------------------------------------------
   // Portuguese (PT-PT) UI strings. Every user-facing label, toast, hint
@@ -412,6 +412,7 @@
     "For:": "Para:",
     "Click to center the map here": "Clique para centrar o mapa aqui",
     "This feature is restricted to editors on the approved list.": "Esta funcionalidade está restringida a editores na lista aprovada.",
+    "Access restricted": "Acesso restringido",
     "(locked by creator)": "(bloqueado pelo criador)",
     "Detected editor level": "Nível de editor detetado",
     "Editor level not detected yet": "Nível de editor ainda não detetado",
@@ -2288,6 +2289,12 @@
   // itself changing) triggers the right re-sync without one masking
   // the other.
   let lastKnownAllowlistAllowed = false;
+  // Shows the "contact Xtryker" notice at most once per page load — this
+  // is "you were checked and you're simply not on the list", which is
+  // permanent for the whole session (the allowlist itself can't change
+  // out from under a running page), unlike becameDisallowed above which
+  // is a real revocation mid-session and deliberately CAN re-fire.
+  let accessDeniedNoticeShown = false;
   // setInterval fires on a fixed schedule regardless of whether the
   // PREVIOUS invocation has finished, and this function awaits a check
   // that can involve a network fetch. Without this guard, a fetch slower
@@ -2323,6 +2330,45 @@
   //    mounted ahead of time, isEditorAllowed() is simply checked again
   //    at the moment of each right-click, so it can never go stale
   //    between ticks the way an already-built panel could.
+  // Shown once, to an editor who was checked against the allowlist and
+  // found NOT on it — see accessDeniedNoticeShown's own comment for why
+  // this fires at most once. openModal() is the same modal machinery
+  // every other dialog in this file uses (drag, Escape-to-close, the
+  // backdrop click), so this behaves exactly like any other popup here,
+  // not a one-off native alert().
+  function showAccessDeniedNotice() {
+    openModal({
+      title: T("Access restricted"),
+      icon: ICONS.lock,
+      build: ({ body, close }) => {
+        const msg = document.createElement("div");
+        // Hardcoded PT text with a real embedded hyperlink, rather than
+        // several separate T() keys stitched around a raw <a> tag — the
+        // same call this file already makes for the sidebar's own
+        // credit line further down, and for the same reason: this
+        // script only ever targets a PT-PT audience, so splitting one
+        // sentence across multiple translation keys just to keep each
+        // half independently "translatable" buys nothing real.
+        msg.innerHTML = "Este script está desativado para a sua conta "
+          + "— o seu nome de editor não consta da lista de editores aprovados."
+          + "<br><br>Contacte "
+          + '<a href="https://www.waze.com/pt-PT/user/editor/Xtryker" target="_blank" rel="noopener noreferrer" '
+          + 'style="color:#3b82f6;font-weight:700;text-decoration:underline;">Xtryker</a>'
+          + " para pedir acesso.";
+        body.appendChild(msg);
+
+        const actions = document.createElement("div");
+        actions.className = "wmeRcActions";
+        const okBtn = document.createElement("div");
+        okBtn.className = "wmeRcBtn primary";
+        okBtn.textContent = T("Close");
+        okBtn.addEventListener("click", close);
+        actions.appendChild(okBtn);
+        body.appendChild(actions);
+      },
+    });
+  }
+
   async function refreshPinsAccessState() {
     if (pinsAccessRefreshInFlight) return;
     pinsAccessRefreshInFlight = true;
@@ -2342,6 +2388,17 @@
       } else if (becameDisallowed) {
         renderPinsPanel();
         renderPinMarkers();
+      }
+
+      // Distinct from becameDisallowed above: that fires when someone
+      // who WAS allowed loses access mid-session (a revocation). This
+      // is "the very first resolved check said no" — gated on
+      // allowlistState.checked so it can only fire once the allowlist
+      // fetch has actually resolved, never while still pending or on a
+      // transient network failure that hasn't resolved either way yet.
+      if (!nowAllowed && allowlistState.checked && !accessDeniedNoticeShown) {
+        accessDeniedNoticeShown = true;
+        showAccessDeniedNotice();
       }
 
       const level = getEditorLevel();
