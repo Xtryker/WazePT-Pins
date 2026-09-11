@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WazePT Pins
 // @namespace    https://greasyfork.org/en/users/1559074-xtryker
-// @version      7.1.0
+// @version      7.1.1
 // @description  Menu circular de clique direito para o Waze Map Editor: Marcar local, Copiar hiperligação permanente, Atualizar aqui, Lomba (Z), Semáforo (Shift+T), Estrada (I)
 // @author       Xtryker
 // @icon         https://i.imgur.com/UksVMzF.png
@@ -35,7 +35,7 @@
 
   const SCRIPT_ID = "wme-rightclick-radial"; // internal id only — kept stable so existing users' saved pins/settings aren't orphaned by a rename
   const SCRIPT_NAME = "WazePT Pins";
-  const SCRIPT_VERSION = "7.0.0";
+  const SCRIPT_VERSION = "7.1.1";
 
   // ------------------------------------------------------------------
   // Portuguese (PT-PT) UI strings. Every user-facing label, toast, hint
@@ -495,17 +495,21 @@
     "Editor (A–Z)": "Editor (A–Z)",
     "Created": "Criado",
     "Edit pin text": "Editar texto do pin",
+    "Edit shared pin": "Editar pin partilhado",
     "Pin name": "Nome do pin",
     "Pin updated": "Pin atualizado",
     "Give the pin a name first.": "Dê primeiro um nome ao pin.",
-    "This pin is shared — the new text will be visible to every editor using the script.":
-      "Este pin é partilhado — o novo texto ficará visível para todos os editores que usam o script.",
+    "This pin is shared — changes are visible to every editor using the script.":
+      "Este pin é partilhado — as alterações ficam visíveis para todos os editores que usam o script.",
     "This pin hasn't been sent yet — try again once it has synced.":
       "Este pin ainda não foi enviado — tente de novo assim que estiver sincronizado.",
-    "Could not rename the shared pin (permission denied)":
-      "Não foi possível renomear o pin partilhado (permissão negada)",
-    "Could not rename the shared pin (check your connection)":
-      "Não foi possível renomear o pin partilhado (verifique a ligação)",
+    "Clear — pin never expires": "Limpar — o pin nunca expira",
+    "That expiry date isn't valid.": "Essa data de expiração não é válida.",
+    "Pick an expiry date in the future.": "Escolha uma data de expiração no futuro.",
+    "Could not update the shared pin (permission denied)":
+      "Não foi possível atualizar o pin partilhado (permissão negada)",
+    "Could not update the shared pin (check your connection)":
+      "Não foi possível atualizar o pin partilhado (verifique a ligação)",
 
     // ── Definições de cortes (v6.2) ──
     "Text filled in by the \"quick description\" toggle in the closures window.":
@@ -2130,6 +2134,31 @@
   // The minimum editor level (1-6, the number Waze shows to editors) that
   // may edit or delete a pin.
   const MIN_EDIT_RANK_LEVEL = 2;
+
+  // Shared by the "share this pin" dialog and the "edit shared pin"
+  // dialog, so both offer the exact same lock-level choices instead of
+  // two option lists that could quietly drift apart. Starts at
+  // MIN_EDIT_RANK_LEVEL: a lock below that would add no restriction
+  // beyond what already applies to every shared pin, so offering it
+  // would just be a confusing no-op option. `selectedLevel` is whatever
+  // the pin already has (0/undefined for "no lock" is fine — it just
+  // selects the first option).
+  function buildLockLevelSelect(selectedLevel) {
+    const sel = document.createElement("select");
+    sel.className = "wmeRcInput";
+    const options = [{ level: 0, label: T("No lock") }];
+    for (let lvl = MIN_EDIT_RANK_LEVEL; lvl <= 6; lvl++) {
+      options.push({ level: lvl, label: `${T("Level")} ${lvl}+` });
+    }
+    for (const o of options) {
+      const opt = document.createElement("option");
+      opt.value = String(o.level);
+      opt.textContent = o.label;
+      sel.appendChild(opt);
+    }
+    sel.value = String(Number(selectedLevel) || 0);
+    return sel;
+  }
 
   // The SDK's UserSession.rank field is Waze's long-standing internal
   // "rank" numbering, which is 0-indexed relative to the level shown in
@@ -4849,7 +4878,16 @@
   // canEditOrDeleteSharedPin) applies here too — otherwise a lock on
   // deletion would be trivially pointless, since anyone could still
   // rename a locked pin to whatever they liked.
-  async function renameSharedPin(id, name) {
+  //
+  // Named generically (not renameSharedPin) because it now also covers
+  // the lock level and expiry — the same three fields openRenamePinModal
+  // lets an editor change. `patch` only needs to contain whichever of
+  // {name, lockLevel, expiresAt} actually changed; a Firebase PATCH only
+  // touches the keys present in the body, so passing just the changed
+  // ones (rather than always all three) is deliberate — it means an
+  // edit that only touched the lock level can't ever accidentally
+  // overwrite a name the caller didn't mean to send.
+  async function updateSharedPin(id, patch) {
     if (!isEditorAllowed()) {
       toast(T("This feature is restricted to editors on the approved list."));
       return false;
@@ -4863,17 +4901,31 @@
       toast(`${T("Requires Level")} ${lockedPin.lockLevel} ${T("or above")} ${T("(locked by creator)")}`);
       return false;
     }
-    const clean = String(name || "").trim().slice(0, 60);
-    if (!clean) return false;
 
-    const patch = async (url) => gmFetch(url, {
+    const body = {};
+    if (Object.prototype.hasOwnProperty.call(patch, "name")) {
+      const clean = String(patch.name || "").trim().slice(0, 60);
+      if (!clean) return false;
+      body.name = clean;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "lockLevel")) {
+      const lvl = Number(patch.lockLevel);
+      body.lockLevel = Number.isFinite(lvl) && lvl > 0 ? Math.round(lvl) : 0;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "expiresAt")) {
+      const exp = Number(patch.expiresAt);
+      body.expiresAt = Number.isFinite(exp) && exp > 0 ? Math.round(exp) : null;
+    }
+    if (!Object.keys(body).length) return false;
+
+    const doPatch = async (url) => gmFetch(url, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: clean }),
+      body: JSON.stringify(body),
     });
 
     const applyLocally = () => {
-      sharedPinsCache = sharedPinsCache.map((p) => (p.id === String(id) ? { ...p, name: clean } : p));
+      sharedPinsCache = sharedPinsCache.map((p) => (p.id === String(id) ? { ...p, ...body } : p));
       saveSharedPinsCache(sharedPinsCache);
       renderPinsPanel();
       renderPinMarkers();
@@ -4885,26 +4937,26 @@
         toast(T("Could not sign in to the shared pins database"));
         return false;
       }
-      const res = await patch(url);
+      const res = await doPatch(url);
       if (!res.ok) {
         let bodyText = "";
         try { bodyText = await res.text(); } catch {}
-        dlog("renameSharedPin error body", bodyText);
+        dlog("updateSharedPin error body", bodyText);
         if (res.status === 401 || res.status === 403) {
           // Same one-shot recovery as addSharedPin/removeSharedPin: a
           // stale token shouldn't cost the user a page reload.
-          dlog("renameSharedPin got 401/403, invalidating session and retrying once");
+          dlog("updateSharedPin got 401/403, invalidating session and retrying once");
           invalidateAuthSession();
           const retrySession = await ensureAuthSession().catch(() => null);
           if (retrySession) {
             const retryUrl = `${firebaseUrl(`${SHARED_PINS_PATH}/${id}`)}?auth=${encodeURIComponent(retrySession.idToken)}`;
-            const retryRes = await patch(retryUrl);
+            const retryRes = await doPatch(retryUrl);
             if (retryRes.ok) { applyLocally(); return true; }
-            dlog("renameSharedPin retry also failed", { status: retryRes.status, localId: retrySession.localId });
+            dlog("updateSharedPin retry also failed", { status: retryRes.status, localId: retrySession.localId });
           } else {
-            dlog("renameSharedPin retry: ensureAuthSession() itself failed");
+            dlog("updateSharedPin retry: ensureAuthSession() itself failed");
           }
-          toast(T("Could not rename the shared pin (permission denied)"));
+          toast(T("Could not update the shared pin (permission denied)"));
           return false;
         }
         throw new Error(`HTTP ${res.status}${bodyText ? `: ${bodyText}` : ""}`);
@@ -4912,8 +4964,8 @@
       applyLocally();
       return true;
     } catch (err) {
-      console.error(`[${SCRIPT_NAME}] renameSharedPin failed:`, err);
-      toast(T("Could not rename the shared pin (check your connection)"));
+      console.error(`[${SCRIPT_NAME}] updateSharedPin failed:`, err);
+      toast(T("Could not update the shared pin (check your connection)"));
       return false;
     }
   }
@@ -5553,15 +5605,28 @@
     try { localStorage.setItem(FOLDER_STATE_KEY, JSON.stringify(state)); } catch {}
   }
 
-  // Opens a small dialog to rewrite a pin's text. Shared and local pins
-  // share the dialog but not the write path: local goes through
-  // updatePin() (localStorage), shared through renameSharedPin() (a
-  // Firebase PATCH), which is also the only one that can fail.
+  // "YYYY-MM-DDTHH:mm" in LOCAL time, the exact value format a
+  // datetime-local input expects. Browsers parse that same string back
+  // as local time too (no timezone offset in it), so this round-trips
+  // through new Date(input.value).getTime() with no separate parser
+  // needed on the way back in.
+  function formatDatetimeLocalInput(ts) {
+    const d = new Date(Number(ts));
+    if (!Number.isFinite(d.getTime())) return "";
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  // Opens a small dialog to rewrite a pin's text, and — for a shared
+  // pin — its lock level and expiry too. Shared and local pins share
+  // the dialog but not the write path: local goes through updatePin()
+  // (localStorage), shared through updateSharedPin() (a Firebase
+  // PATCH), which is also the only one that can fail.
   function openRenamePinModal(pin) {
     const isShared = !!pin.shared;
 
     openModal({
-      title: T("Edit pin text"),
+      title: isShared ? T("Edit shared pin") : T("Edit pin text"),
       icon: ICONS.pencil,
       build: ({ body, close }) => {
         const lbl = document.createElement("div");
@@ -5583,8 +5648,65 @@
         if (isShared) {
           const hint = document.createElement("div");
           hint.className = "wmeRcClHint warn";
-          hint.textContent = T("This pin is shared — the new text will be visible to every editor using the script.");
+          hint.textContent = T("This pin is shared — changes are visible to every editor using the script.");
           body.appendChild(hint);
+        }
+
+        // Lock level and expiry only mean anything for a shared pin — a
+        // personal pin has no one else who'd need to be kept out, and
+        // nothing to expire FOR anyone but the one person who can already
+        // just delete it. canEditOrDeleteSharedPin(pin) below is the same
+        // check updateSharedPin() re-verifies server-round-trip-side; it's
+        // checked here too so a locked pin's fields simply aren't offered
+        // for editing, rather than being editable in the dialog and only
+        // then rejected after a save attempt.
+        const canEditRestricted = isShared && canEditOrDeleteSharedPin(pin);
+        let lockSel = null;
+        let expiryInp = null;
+        if (canEditRestricted) {
+          const lockLbl = document.createElement("div");
+          lockLbl.className = "wmeRcClLbl";
+          lockLbl.style.marginTop = "10px";
+          lockLbl.textContent = T("Lock editing/removal to (optional)");
+          body.appendChild(lockLbl);
+
+          // Shared with the "share this pin" dialog — see
+          // buildLockLevelSelect's own comment.
+          lockSel = buildLockLevelSelect(pin.lockLevel || 0);
+          body.appendChild(lockSel);
+
+          const expiryLbl = document.createElement("div");
+          expiryLbl.className = "wmeRcClLbl";
+          expiryLbl.style.marginTop = "10px";
+          expiryLbl.textContent = T("Expires (optional)");
+          body.appendChild(expiryLbl);
+
+          const expiryRow = document.createElement("div");
+          expiryRow.style.display = "flex";
+          expiryRow.style.gap = "6px";
+          expiryRow.style.alignItems = "center";
+
+          expiryInp = document.createElement("input");
+          expiryInp.type = "datetime-local";
+          expiryInp.className = "wmeRcInput";
+          expiryInp.style.flex = "1 1 auto";
+          if (pin.expiresAt) expiryInp.value = formatDatetimeLocalInput(pin.expiresAt);
+          expiryRow.appendChild(expiryInp);
+
+          const clearBtn = document.createElement("div");
+          clearBtn.className = "wmeRcBtn";
+          clearBtn.textContent = T("Never");
+          clearBtn.title = T("Clear — pin never expires");
+          clearBtn.addEventListener("click", () => { expiryInp.value = ""; });
+          expiryRow.appendChild(clearBtn);
+
+          body.appendChild(expiryRow);
+
+          const expiryHint = document.createElement("div");
+          expiryHint.className = "wmeRcHint";
+          expiryHint.style.marginTop = "4px";
+          expiryHint.textContent = T("The pin is removed for everyone automatically once it expires. Leave empty for no expiry.");
+          body.appendChild(expiryHint);
         }
 
         const actions = document.createElement("div");
@@ -5601,22 +5723,48 @@
         saveBtn.addEventListener("click", async () => {
           const name = inp.value.trim();
           if (!name) { toast(T("Give the pin a name first.")); return; }
-          if (name === pin.name) { close(); return; }
           if (saveBtn.classList.contains("is-disabled")) return;
 
           if (!isShared) {
+            if (name === pin.name) { close(); return; }
             updatePin(pin.id, { name });
             toast(T("Pin updated"));
             close();
             return;
           }
 
+          // Only the fields that actually changed go into the patch —
+          // see updateSharedPin's own comment for why that matters. A
+          // pin whose lock/expiry controls weren't offered (because the
+          // viewer can't edit them — canEditRestricted above) can still
+          // have its NAME changed here (renaming isn't lock-restricted,
+          // same as before this feature existed), just not those two.
+          const patch = {};
+          if (name !== pin.name) patch.name = name;
+          if (lockSel) {
+            const newLock = Number(lockSel.value) || 0;
+            if (newLock !== (pin.lockLevel || 0)) patch.lockLevel = newLock;
+          }
+          if (expiryInp) {
+            const raw = expiryInp.value;
+            let newExpiresAt = null;
+            if (raw) {
+              const parsed = new Date(raw).getTime();
+              if (!Number.isFinite(parsed)) { toast(T("That expiry date isn't valid.")); return; }
+              if (parsed <= Date.now()) { toast(T("Pick an expiry date in the future.")); return; }
+              newExpiresAt = parsed;
+            }
+            if (newExpiresAt !== (pin.expiresAt || null)) patch.expiresAt = newExpiresAt;
+          }
+
+          if (!Object.keys(patch).length) { close(); return; }
+
           // The network round-trip can fail, so the dialog stays open and
           // locked until it resolves — closing optimistically would leave
           // the user believing an edit landed when it didn't.
           saveBtn.classList.add("is-disabled");
           saveBtn.textContent = T("Saving…");
-          const ok = await renameSharedPin(pin.id, name);
+          const ok = await updateSharedPin(pin.id, patch);
           saveBtn.classList.remove("is-disabled");
           saveBtn.textContent = T("Save");
           if (ok) { toast(T("Pin updated")); close(); }
@@ -7996,21 +8144,10 @@
         lockLbl.textContent = T("Lock editing/removal to (optional)");
         lockWrap.appendChild(lockLbl);
 
-        const lockSel = document.createElement("select");
-        lockSel.className = "wmeRcInput";
-        // Starts at MIN_EDIT_RANK_LEVEL: a lock below that would add no
-        // restriction beyond what already applies to every shared pin,
-        // so offering it would just be a confusing no-op option.
-        const LOCK_OPTIONS = [{ level: 0, label: T("No lock") }];
-        for (let lvl = MIN_EDIT_RANK_LEVEL; lvl <= 6; lvl++) {
-          LOCK_OPTIONS.push({ level: lvl, label: `${T("Level")} ${lvl}+` });
-        }
-        for (const o of LOCK_OPTIONS) {
-          const opt = document.createElement("option");
-          opt.value = String(o.level);
-          opt.textContent = o.label;
-          lockSel.appendChild(opt);
-        }
+        // Shared with the "edit shared pin" dialog — see
+        // buildLockLevelSelect's own comment for why. No pin exists yet
+        // at creation time, so nothing to preselect: 0 ("No lock").
+        const lockSel = buildLockLevelSelect(0);
         lockWrap.appendChild(lockSel);
 
         const lockHint = document.createElement("div");
