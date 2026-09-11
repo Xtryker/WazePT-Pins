@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WazePT Pins
 // @namespace    https://greasyfork.org/en/users/1559074-xtryker
-// @version      6.31.1
+// @version      7.0.0
 // @description  Menu circular de clique direito para o Waze Map Editor: Marcar local, Copiar hiperligação permanente, Atualizar aqui, Lomba (Z), Semáforo (Shift+T), Estrada (I)
 // @author       Xtryker
 // @icon         https://i.imgur.com/UksVMzF.png
@@ -9,11 +9,11 @@
 // @match        https://www.waze.com/editor*
 // @match        https://beta.waze.com/*/editor*
 // @match        https://beta.waze.com/editor*
+// @updateURL    https://github.com/Xtryker/WazePT-Pins/raw/refs/heads/main/WazePT%20Pins.user.js
+// @downloadURL  https://github.com/Xtryker/WazePT-Pins/raw/refs/heads/main/WazePT%20Pins.user.js
 // @grant        GM_setClipboard
 // @grant        unsafeWindow
 // @grant        GM_xmlhttpRequest
-// @downloadURL https://github.com/Xtryker/WazePT-Pins/raw/refs/heads/main/WazePT%20Pins.user.js
-// @UpdateURL https://github.com/Xtryker/WazePT-Pins/raw/refs/heads/main/WazePT%20Pins.user.js
 // @connect      wazept-pins-default-rtdb.europe-west1.firebasedatabase.app
 // @connect      identitytoolkit.googleapis.com
 // @connect      securetoken.googleapis.com
@@ -35,7 +35,7 @@
 
   const SCRIPT_ID = "wme-rightclick-radial"; // internal id only — kept stable so existing users' saved pins/settings aren't orphaned by a rename
   const SCRIPT_NAME = "WazePT Pins";
-  const SCRIPT_VERSION = "6.31.0";
+  const SCRIPT_VERSION = "7.0.0";
 
   // ------------------------------------------------------------------
   // Portuguese (PT-PT) UI strings. Every user-facing label, toast, hint
@@ -6533,6 +6533,32 @@
     for (const p of loadPins()) scheduleReminderTimer(p);
   }
 
+  // Called only from an explicit user action on a reminder notice —
+  // Dismiss, the notice's own X, or Go there — never from the code that
+  // merely SHOWS the notice. See the note inside triggerReminder for why
+  // that distinction is the actual fix, not just tidiness: persisting
+  // "handled" at show-time meant a reminder popup still sitting on
+  // screen, never clicked, silently vanished forever if the browser tab
+  // closed before the user got to it.
+  function acknowledgeReminder(pin) {
+    if (!pin || !pin.id) return;
+    const every = repeatMs(pin);
+    if (every > 0) {
+      // Recurring: advance to the next occurrence instead of marking
+      // done outright. Skips forward past any occurrences that already
+      // elapsed while this one sat unacknowledged — the same
+      // skip-forward this loop always did for a laptop asleep through
+      // several cycles, just now driven by acknowledgement instead of
+      // by the popup merely appearing.
+      let next = pin.reminderAt + every;
+      const now = Date.now();
+      while (next <= now) next += every;
+      updatePin(pin.id, { reminderAt: next, reminderDone: false });
+    } else {
+      updatePin(pin.id, { reminderDone: true });
+    }
+  }
+
   function triggerReminder(id, expectedAt) {
     const pin = loadPins().find((p) => p.id === id);
     if (!pin || !pin.reminderAt || pin.reminderDone) return;
@@ -6548,19 +6574,19 @@
       sendWebhookNotification(pin);
     }
 
-    const every = repeatMs(pin);
-    if (every > 0) {
-      // Recurring: schedule the next occurrence instead of marking done.
-      // Skip forward past any already-elapsed occurrences (e.g. laptop
-      // was asleep for several cycles) rather than firing a burst of them.
-      let next = pin.reminderAt + every;
-      const now = Date.now();
-      while (next <= now) next += every;
-      firedReminderIds.delete(id);
-      updatePin(id, { reminderAt: next, reminderDone: false });
-    } else {
-      updatePin(id, { reminderDone: true });
-    }
+    // Deliberately NOT touching reminderDone/reminderAt here anymore —
+    // that used to happen right here, the instant the popup was merely
+    // SHOWN, whether or not it was ever actually seen or clicked. A
+    // reminder that fired right as the tab was closed came back to an
+    // empty map on the next visit: the script had already recorded it
+    // as dealt with, as if closing the tab meant "disregard". Persisted
+    // state now only changes via acknowledgeReminder() above (wired to
+    // Dismiss/X/Go there in showReminderNotice) or an explicit Snooze.
+    // firedReminderIds (added to above) is what stops THIS instant from
+    // re-triggering the popup on every 1.5s tick for the rest of the
+    // current session — it's in-memory only, not persisted, so a fresh
+    // tab opened later finds the pin exactly as due as it still is and
+    // shows the popup again rather than staying silent forever.
   }
 
   function checkRemindersNow() {
@@ -6582,8 +6608,23 @@
     const pins = loadPins();
     const missed = pins.filter((p) => p.reminderAt && !p.reminderDone && p.reminderAt <= now - 2000);
     if (!missed.length) return;
-    for (const p of missed) updatePin(p.id, { reminderDone: true });
-    showReminderNotice(missed[0], { title: T("Missed reminder"), silent: true });
+    // Used to eagerly mark EVERY missed reminder reminderDone here and
+    // only ever show a notice for missed[0] — so on a tab that had been
+    // closed a while (several reminders now overdue), every one but the
+    // first was silently discarded with no notice at all, permanently.
+    // Now every missed pin gets its own notice, and none of them are
+    // marked done until the user actually acts on it (Dismiss/X/Go
+    // there/Snooze — see acknowledgeReminder above triggerReminder).
+    //
+    // firedReminderIds still gets each id added, though: without that,
+    // startReminderLoop()'s scheduleAllReminderTimers()+checkRemindersNow()
+    // call right after this would see the exact same still-not-done
+    // pins and fire triggerReminder() on them again immediately — a
+    // second, duplicate popup per pin one tick later.
+    for (const p of missed) {
+      firedReminderIds.add(String(p.id));
+      showReminderNotice(p, { title: T("Missed reminder"), silent: true });
+    }
   }
 
   function startReminderLoop() {
@@ -6706,10 +6747,20 @@
       setTimeout(() => document.addEventListener("pointerdown", onSnoozeOutside, true), 0);
     });
 
-    card.querySelector(".wmeRcNoticeX").addEventListener("click", close);
-    card.querySelector(".wmeRcNoticeDismiss").addEventListener("click", close);
+    // Any of these three counts as an explicit "yes, I've seen this" —
+    // the only thing now allowed to mark a reminder handled or advance
+    // a recurring one to its next occurrence. See acknowledgeReminder
+    // (defined above triggerReminder) and the note inside triggerReminder
+    // itself for why that used to happen too early.
+    const acknowledgeAndClose = () => {
+      acknowledgeReminder(pin);
+      close();
+    };
+    card.querySelector(".wmeRcNoticeX").addEventListener("click", acknowledgeAndClose);
+    card.querySelector(".wmeRcNoticeDismiss").addEventListener("click", acknowledgeAndClose);
     card.querySelector(".wmeRcNoticeGo").addEventListener("click", () => {
       centerMapOn(pin.lon, pin.lat, pin.zoom || 17);
+      acknowledgeReminder(pin);
       close();
     });
 
