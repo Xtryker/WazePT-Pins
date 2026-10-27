@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WazePT Tools
 // @namespace    https://greasyfork.org/en/users/1559074-xtryker
-// @version      7.95.3
+// @version      7.95.4
 // @description  Menu circular de clique direito para o Waze Map Editor
 // @author       Xtryker
 // @icon         https://i.imgur.com/UksVMzF.png
